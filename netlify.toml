@@ -1,8 +1,11 @@
 [build]
   base = "client"
-  command = "npm run build"
+  command = "npm install --include=dev && npm run build"
   publish = "dist"
   functions = "client/functions"
+
+[build.environment]
+  NPM_FLAGS = "--include=dev"
 
 [functions]
   node_bundler = "esbuild"
