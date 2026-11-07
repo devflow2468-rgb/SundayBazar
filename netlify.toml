@@ -2,7 +2,7 @@
   base = "client"
   command = "npm run build"
   publish = "dist"
-  functions = "functions"
+  functions = "client/functions"
 
 [functions]
   node_bundler = "esbuild"
