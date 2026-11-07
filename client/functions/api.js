@@ -1,33 +1,44 @@
 // Sunday Bazar Backend - Netlify Serverless Function
-// Poora Express app yahan chalega - 24/7 free on Netlify!
+// High-performance Express API connected to MongoDB Atlas
 
 import express from "express";
 import cors from "cors";
 import cookieParser from "cookie-parser";
-import mongoSanitize from "express-mongo-sanitize";
 import mongoose from "mongoose";
 import bcrypt from "bcryptjs";
 import jwt from "jsonwebtoken";
 import nodemailer from "nodemailer";
-import rateLimit from "express-rate-limit";
 import serverless from "serverless-http";
 import dotenv from "dotenv";
 
 dotenv.config();
 
 // =================== DATABASE ===================
-let isConnected = false;
+const MONGO_URI =
+  process.env.MONGO_URI ||
+  "mongodb+srv://devflow2468_db_user:BufB1IOylUAgtgDi@cluster0.eqr3i86.mongodb.net/sunday_bazar?retryWrites=true&w=majority";
+
+let isConnecting = false;
 
 const connectDB = async () => {
-  if (isConnected) return;
+  if (mongoose.connection.readyState === 1) return;
+  if (isConnecting) {
+    while (mongoose.connection.readyState !== 1) {
+      await new Promise((r) => setTimeout(r, 100));
+    }
+    return;
+  }
   try {
-    await mongoose.connect(process.env.MONGO_URI, {
-      serverSelectionTimeoutMS: 10000,
+    isConnecting = true;
+    await mongoose.connect(MONGO_URI, {
+      serverSelectionTimeoutMS: 15000,
     });
-    isConnected = true;
     console.log("[Sunday Bazar] MongoDB Atlas Connected!");
   } catch (err) {
     console.error("[Sunday Bazar] DB Error:", err.message);
+    throw err;
+  } finally {
+    isConnecting = false;
   }
 };
 
@@ -148,31 +159,31 @@ const Order = mongoose.models.Order || mongoose.model("Order", orderSchema);
 // =================== UTILS ===================
 
 const sendOTPEmail = async (email, otp) => {
-  console.log(`\n========================================`);
   console.log(`[SUNDAY BAZAR] OTP for ${email}: >>> ${otp} <<<`);
-  console.log(`========================================\n`);
 
-  if (!process.env.EMAIL_USER) return true;
+  const user = process.env.EMAIL_USER || "devflow2468@gmail.com";
+  const pass = process.env.EMAIL_PASS || "ovmukktxwflapybr";
 
   try {
     const transporter = nodemailer.createTransport({
       service: "gmail",
-      auth: { user: process.env.EMAIL_USER, pass: process.env.EMAIL_PASS },
+      auth: { user, pass },
     });
 
     await transporter.sendMail({
-      from: `Sunday Bazar <${process.env.EMAIL_USER}>`,
+      from: `Sunday Bazar <${user}>`,
       to: email,
-      subject: `[Sunday Bazar] Your OTP: ${otp}`,
+      subject: `[Sunday Bazar] Your Account Verification OTP: ${otp}`,
       html: `
-        <div style="font-family:Arial,sans-serif;background:#f8f9fa;padding:25px;border-radius:8px;">
-          <div style="max-width:500px;margin:0 auto;background:#fff;padding:30px;border-radius:8px;border:1px solid #e2e8f0;">
-            <h2 style="color:#1B9425;margin-top:0;">SundayBazar</h2>
-            <p>Your 6-digit verification OTP:</p>
-            <div style="background:#f1fbf3;border:2px dashed #1B9425;padding:15px;text-align:center;font-size:28px;font-weight:bold;letter-spacing:5px;color:#1B9425;margin:20px 0;border-radius:6px;">
+        <div style="font-family: Arial, sans-serif; background: #f8f9fa; padding: 25px; border-radius: 8px;">
+          <div style="max-width: 500px; margin: 0 auto; background: #fff; padding: 30px; border-radius: 8px; border: 1px solid #e2e8f0;">
+            <h2 style="color: #1B9425; margin-top: 0;">Sunday Bazar</h2>
+            <p style="color: #1e293b; font-size: 16px;">Assalam-o-Alaikum,</p>
+            <p style="color: #475569; font-size: 15px;">Aapka verification OTP ye hai:</p>
+            <div style="background: #f1fbf3; border: 2px dashed #1B9425; padding: 15px; text-align: center; font-size: 28px; font-weight: bold; letter-spacing: 5px; color: #1B9425; margin: 20px 0; border-radius: 6px;">
               ${otp}
             </div>
-            <p style="color:#64748b;font-size:13px;">This OTP expires in 10 minutes.</p>
+            <p style="color: #64748b; font-size: 13px;">Ye OTP 10 minute tak valid hai.</p>
           </div>
         </div>
       `,
@@ -184,11 +195,11 @@ const sendOTPEmail = async (email, otp) => {
   }
 };
 
-// JWT Helper
 const sendTokenResponse = (user, statusCode, res, message) => {
+  const secret = process.env.JWT_SECRET || "sunday_bazar_super_secure_jwt_secret_key_2026_production";
   const token = jwt.sign(
     { id: user._id, role: user.role, email: user.email },
-    process.env.JWT_SECRET || "sunday_bazar_fallback_secret",
+    secret,
     { expiresIn: "7d" }
   );
 
@@ -207,7 +218,6 @@ const sendTokenResponse = (user, statusCode, res, message) => {
   });
 };
 
-// Auth Middleware
 const protect = async (req, res, next) => {
   let token;
   if (req.cookies && req.cookies.token) {
@@ -221,7 +231,8 @@ const protect = async (req, res, next) => {
   }
 
   try {
-    const decoded = jwt.verify(token, process.env.JWT_SECRET || "sunday_bazar_fallback_secret");
+    const secret = process.env.JWT_SECRET || "sunday_bazar_super_secure_jwt_secret_key_2026_production";
+    const decoded = jwt.verify(token, secret);
     const user = await User.findById(decoded.id).select("-password");
     if (!user) return res.status(401).json({ success: false, message: "User not found." });
     req.user = user;
@@ -241,17 +252,26 @@ const restrictToAdmin = (req, res, next) => {
 // =================== EXPRESS APP ===================
 const app = express();
 
+// Path normalizer: handles /.netlify/functions/api, /api, or direct routes seamlessly
+app.use((req, res, next) => {
+  if (req.url.startsWith("/.netlify/functions/api")) {
+    req.url = req.url.replace("/.netlify/functions/api", "/api");
+  } else if (!req.url.startsWith("/api")) {
+    req.url = "/api" + (req.url.startsWith("/") ? req.url : "/" + req.url);
+  }
+  next();
+});
+
 // Middleware
 app.use(express.json({ limit: "10mb" }));
 app.use(express.urlencoded({ extended: true, limit: "10mb" }));
 app.use(cookieParser());
-app.use(mongoSanitize());
 
 // CORS - Allow Netlify frontend
 app.use(
   cors({
     origin: (origin, callback) => {
-      callback(null, true); // Allow all origins (Netlify handles security)
+      callback(null, true);
     },
     credentials: true,
     methods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
@@ -261,8 +281,16 @@ app.use(
 
 // Connect DB before every request
 app.use(async (req, res, next) => {
-  await connectDB();
-  next();
+  try {
+    await connectDB();
+    next();
+  } catch (err) {
+    return res.status(500).json({
+      success: false,
+      message: "Database connection failed. Check MongoDB Atlas cluster connection.",
+      error: err.message,
+    });
+  }
 });
 
 // =================== ROUTES ===================
@@ -271,16 +299,14 @@ app.use(async (req, res, next) => {
 app.get("/api/health", (req, res) => {
   res.json({
     status: "online",
-    brand: "Sunday Bazar",
+    brand: "Sunday Bazar (High Performance MERN)",
     uptime: process.uptime(),
     timestamp: new Date().toISOString(),
   });
 });
 
 // --- AUTH ROUTES ---
-const authLimiter = rateLimit({ windowMs: 15 * 60 * 1000, max: 20 });
-
-app.post("/api/auth/register/request-otp", authLimiter, async (req, res) => {
+app.post("/api/auth/register/request-otp", async (req, res) => {
   try {
     const { name, email, password } = req.body;
     if (!name || !email || !password) {
@@ -295,23 +321,30 @@ app.post("/api/auth/register/request-otp", authLimiter, async (req, res) => {
       return res.status(409).json({
         success: false,
         isExisting: true,
-        message: "Email already registered! Please log in.",
+        message: "Email already registered! Please log in directly.",
       });
     }
 
-    // Remove old unverified entry for same email
-    await User.deleteOne({ email: email.toLowerCase(), isVerified: false });
+    // Remove any previous unverified attempt
+    await User.deleteMany({ email: email.toLowerCase(), isVerified: false });
 
     const otp = Math.floor(100000 + Math.random() * 900000).toString();
     const otpExpires = new Date(Date.now() + 10 * 60 * 1000);
 
-    const tempUser = new User({ name, email: email.toLowerCase(), password, isVerified: false, otpCode: otp, otpExpires });
+    const tempUser = new User({
+      name,
+      email: email.toLowerCase(),
+      password,
+      isVerified: false,
+      otpCode: otp,
+      otpExpires,
+    });
     await tempUser.save();
     await sendOTPEmail(tempUser.email, otp);
 
     return res.status(200).json({
       success: true,
-      message: `OTP sent to ${email}. Check your Gmail inbox.`,
+      message: `Verification OTP sent to ${tempUser.email}. Check your Gmail inbox.`,
       email: tempUser.email,
     });
   } catch (error) {
@@ -319,14 +352,18 @@ app.post("/api/auth/register/request-otp", authLimiter, async (req, res) => {
   }
 });
 
-app.post("/api/auth/register/verify-otp", authLimiter, async (req, res) => {
+app.post("/api/auth/register/verify-otp", async (req, res) => {
   try {
     const { email, otp } = req.body;
     if (!email || !otp) return res.status(400).json({ success: false, message: "Email and OTP required." });
 
-    const user = await User.findOne({ email: email.toLowerCase(), isVerified: false }).select("+otpCode +otpExpires +password");
-    if (!user) return res.status(400).json({ success: false, message: "No pending registration. Please register again." });
-    if (user.otpCode !== otp.trim()) return res.status(400).json({ success: false, message: "Invalid OTP. Check your Gmail." });
+    const user = await User.findOne({
+      email: email.toLowerCase(),
+      isVerified: false,
+    }).select("+otpCode +otpExpires +password");
+
+    if (!user) return res.status(400).json({ success: false, message: "No pending registration found. Please register again." });
+    if (user.otpCode !== otp.trim()) return res.status(400).json({ success: false, message: "Invalid OTP code. Please check your Gmail." });
     if (new Date() > user.otpExpires) return res.status(400).json({ success: false, message: "OTP expired. Please register again." });
 
     user.isVerified = true;
@@ -340,18 +377,18 @@ app.post("/api/auth/register/verify-otp", authLimiter, async (req, res) => {
   }
 });
 
-app.post("/api/auth/login", authLimiter, async (req, res) => {
+app.post("/api/auth/login", async (req, res) => {
   try {
     const { email, password } = req.body;
     if (!email || !password) return res.status(400).json({ success: false, message: "Email and password required." });
 
     const user = await User.findOne({ email: email.toLowerCase() }).select("+password");
-    if (!user) return res.status(401).json({ success: false, message: "Account not found. Please register." });
+    if (!user) return res.status(401).json({ success: false, message: "Account not found. Please register first." });
 
     const isMatch = await user.comparePassword(password);
-    if (!isMatch) return res.status(401).json({ success: false, message: "Invalid password." });
+    if (!isMatch) return res.status(401).json({ success: false, message: "Incorrect password." });
 
-    sendTokenResponse(user, 200, res, `Welcome, ${user.name}! Login successful.`);
+    sendTokenResponse(user, 200, res, `Khush-Amdeed, ${user.name}! Login successful.`);
   } catch (error) {
     return res.status(500).json({ success: false, message: error.message });
   }
@@ -367,7 +404,7 @@ app.get("/api/auth/me", protect, async (req, res) => {
 });
 
 app.post("/api/auth/logout", protect, (req, res) => {
-  res.json({ success: true, message: "Logged out successfully." });
+  res.json({ success: true, message: "Logged out successfully from Sunday Bazar." });
 });
 
 // --- CATEGORY ROUTES ---
@@ -459,7 +496,14 @@ app.get("/api/products", async (req, res) => {
       .skip(skip)
       .limit(Number(limit));
 
-    return res.json({ success: true, total, page: Number(page), pages: Math.ceil(total / Number(limit)), count: products.length, data: products });
+    return res.json({
+      success: true,
+      total,
+      page: Number(page),
+      pages: Math.ceil(total / Number(limit)),
+      count: products.length,
+      data: products,
+    });
   } catch (error) {
     return res.status(500).json({ success: false, message: error.message });
   }
@@ -481,7 +525,17 @@ app.post("/api/products", protect, restrictToAdmin, async (req, res) => {
     if (!title || !description || !price || !imageUrl || !category) {
       return res.status(400).json({ success: false, message: "Title, description, price, category, and image URL are required." });
     }
-    const product = await Product.create({ title, description, price, originalPrice: originalPrice || Math.round(price * 1.25), imageUrl, category, stock: stock || 10, isFlashSale: !!isFlashSale, discountPercentage: discountPercentage || 0 });
+    const product = await Product.create({
+      title,
+      description,
+      price,
+      originalPrice: originalPrice || Math.round(price * 1.25),
+      imageUrl,
+      category,
+      stock: stock || 10,
+      isFlashSale: !!isFlashSale,
+      discountPercentage: discountPercentage || 0,
+    });
     const populated = await Product.findById(product._id).populate("category", "name slug");
     return res.status(201).json({ success: true, data: populated });
   } catch (error) {
@@ -525,12 +579,26 @@ app.post("/api/orders", protect, async (req, res) => {
       const prod = await Product.findById(item.product);
       if (!prod) return res.status(404).json({ success: false, message: `Product not found: ${item.title}` });
       totalPrice += prod.price * item.quantity;
-      validatedItems.push({ product: prod._id, title: prod.title, imageUrl: prod.imageUrl, price: prod.price, quantity: item.quantity });
+      validatedItems.push({
+        product: prod._id,
+        title: prod.title,
+        imageUrl: prod.imageUrl,
+        price: prod.price,
+        quantity: item.quantity,
+      });
       prod.stock = Math.max(0, prod.stock - item.quantity);
       await prod.save();
     }
 
-    const order = await Order.create({ user: req.user._id, items: validatedItems, totalPrice, shippingAddress, deliveryStatus: "Pending", paymentMethod: "Cash on Delivery (COD)", isPaid: false });
+    const order = await Order.create({
+      user: req.user._id,
+      items: validatedItems,
+      totalPrice,
+      shippingAddress,
+      deliveryStatus: "Pending",
+      paymentMethod: "Cash on Delivery (COD)",
+      isPaid: false,
+    });
     return res.status(201).json({ success: true, message: "Order placed successfully! Cash on Delivery.", data: order });
   } catch (error) {
     return res.status(500).json({ success: false, message: error.message });
